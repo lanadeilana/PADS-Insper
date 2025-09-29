@@ -1,0 +1,935 @@
+---
+title: "Projeto Integrador - 1º Trimestre"
+subtitle: "Programa Avançado em Data Science e Decisão - Insper"
+author: "Ilana Garcia, Izabelle Silva, Júlia Borges, Lívia Bertoni"
+date: "14/09/2025"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    number_sections: true
+    theme: flatly
+    highlight: tango
+    code_folding: hide
+    self_contained: true
+    css: |
+      .main-container {
+        max-width: 1200px !important;
+        margin: 0 auto;
+        font-family: "Inter", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+        line-height: 1.65;
+      }
+
+      .title {
+        color: #2C3E50;
+        font-size: 2.8em;
+        font-weight: 700;
+        margin-bottom: 8px;
+        letter-spacing: -0.5px;
+        line-height: 1.2;
+      }
+
+      .subtitle {
+        color: #7F8C8D;
+        font-size: 1.2em;
+        font-style: italic;
+        margin-bottom: 28px;
+      }
+
+      h1, h2 {
+        color: #2C3E50;
+        border-bottom: 2px solid #3498DB;
+        padding-bottom: 8px;
+      }
+
+      h3 {
+        color: #34495E;
+        margin-top: 20px;
+      }
+
+      /* ===== Alerts ===== */
+      .alert {
+        padding: 16px 20px;
+        margin: 22px 0;
+        border-radius: 10px;
+        border-left: 6px solid;
+        position: relative;
+        box-shadow: 0 3px 10px rgba(0,0,0,0.05);
+      }
+      .alert-info {
+        background: #E6F3FA; 
+        border-color: #A9D6F5;
+        color: #1F3B57;
+        font-weight: 400;
+      }
+      }
+
+---
+
+
+# Introdução
+
+Quando falamos em **churn** (rotatividade), normalmente pensamos em clientes que cancelam assinaturas ou deixam de consumir determinados produtos. Porém, o mesmo conceito pode ser aplicado ao mundo empresarial: empresas também podem encerrar suas atividades de forma definitiva. Esse é um problema real e de alto impacto financeiro para diferentes agentes econômicos.  
+
+- **Bancos** ajustam suas políticas de crédito de acordo com os riscos de fechamento identificados.  
+- **Fornecedores** podem revisar prazos e condições de pagamento.  
+- **Investidores** tomam decisões mais embasadas sobre onde alocar recursos.  
+- **Consultores** identificam organizações em dificuldade e oferecem soluções adequadas.  
+
+Neste projeto, nosso objetivo é **desenvolver modelos de aprendizado de máquina para prever se uma empresa irá encerrar suas operações nos dois anos seguintes**. Para isso, utilizaremos dados reais de empresas europeias coletados pela **Bisnode** em 2012. Embora o dataset original cubra o período de 2005 a 2016, nossa análise será focada apenas no ano de 2012.  
+
+Para verificar o tratamento inicial realizado no conjunto de dados, garantindo que ele estivesse pronto para a modelagem, **[clique aqui](https://colab.research.google.com/drive/1vUfRjTTczjq2sLh3RB32X0f5e-T_KmAG?usp=sharing)**.  
+
+
+```{r setup, message=FALSE, warning=FALSE}
+
+# Configuração inicial
+if (!requireNamespace("xgboost", quietly = TRUE)) install.packages("xgboost")
+library(tidymodels)
+library(themis)
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(forcats)
+library(yardstick)
+library(knitr)
+library(kableExtra)
+library(rpart)
+library(rpart.plot)
+library(xgboost)
+library(gt)
+
+tidymodels_prefer()
+
+# Tema dográfico
+tema_grafico <- theme_minimal() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", color = "#2C3E50"),
+    axis.title = element_text(size = 11, face = "bold"),
+    axis.text = element_text(size = 10, color = "#4D4D4D"),
+    legend.position = "bottom",
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank()
+  )
+
+```
+
+# Preparação dos dados para a modelagem
+
+<div class="alert alert-info">
+Antes de ajustar qualquer modelo, é fundamental garantir que a base de dados esteja pronta para o processo de modelagem. Isso envolve não apenas selecionar as variáveis finais, mas também verificar a distribuição da variável resposta e dividir os dados em conjuntos de treino e teste.
+</div>
+
+O dataset utilizado já passou por uma etapa prévia de **limpeza em Python**, resultando em uma versão final enxuta com indicadores demográficos, financeiros e flags de imputação. A partir desse ponto, o objetivo é estruturar o conjunto de dados no R para os experimentos de modelagem.
+
+Nesta seção, vamos:
+
+1. Confirmar que a variável alvo (`churn_in_2y_int`) está devidamente configurada como binária (0 = empresa ativa, 1 = empresa que encerrou atividades).  
+2. Explorar o balanceamento da variável resposta, verificando a proporção de empresas que fecharam em até dois anos.  
+3. Realizar a divisão dos dados em **conjunto de treino** (70%) e **conjunto de teste** (30%), de forma estratificada, para garantir que ambas as classes estejam representadas de maneira proporcional nos dois subconjuntos.  
+
+Esses passos são essenciais para que os modelos treinados possam ser avaliados corretamente e para que os resultados obtidos reflitam a realidade do problema de negócio.
+
+```{r load, message=FALSE, warning=FALSE}
+
+df <- read_csv(
+  "https://raw.githubusercontent.com/silvaizabelle/projeto_integrador_1tri/main/dataset_modelagem_final.csv",
+  show_col_types = FALSE
+)
+
+cat("Dimensões do dataset:", dim(df)[1], "empresas e", dim(df)[2], "variáveis")
+
+```
+
+
+```{r, factor, message=FALSE, warning=FALSE}
+# Garantindo que a variável resposta esteja como fator (0 = ativa, 1 = fechou) 
+df <- df %>%
+  mutate(churn_in_2y_int = factor(churn_in_2y_int,
+                                  levels = c(0, 1),
+                                  labels = c("continua", "fecha")))
+
+```
+
+```{r, label and proportion, message=FALSE, warning=FALSE, echo=FALSE}
+prop_churn <- df %>%
+  count(churn_in_2y_int) %>%
+  mutate(prop = round(n / sum(n) * 100, 1))
+
+kable(prop_churn, caption = "Distribuição da variável resposta") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+
+ggplot(df, aes(x = churn_in_2y_int, fill = churn_in_2y_int)) +
+  geom_bar(color = "white") +
+  geom_text(
+    data = prop_churn,
+    aes(x = churn_in_2y_int, y = n, label = paste0(n, " (", prop, "%)")),
+    vjust = -0.5, size = 4, fontface = "bold"
+  ) +
+  scale_fill_manual(values = c("continua" = "#A8D5BA", "fecha" = "#F7B7A3")) +
+  labs(
+    title = "Distribuição da variável alvo",
+    subtitle = "A maioria das empresas continua operando (dados desbalanceados)",
+    x = "Status", y = "Número de empresas"
+  ) +
+  tema_grafico +
+  theme(legend.position = "none")
+
+
+```
+
+## Verificação do balanceamento após o split
+
+<div class="alert alert-info">
+Ao dividir os dados em treino (70%) e teste (30%), é fundamental verificar se as proporções da variável resposta foram preservadas.
+</div>
+
+```{r, split and comparision, message=FALSE, warning=FALSE}
+# Split estratificado dos dados (70% treino, 30% teste)
+set.seed(123)
+split <- initial_split(df, prop = 0.7, strata = churn_in_2y_int)
+train <- training(split)
+test  <- testing(split)
+
+# Checar proporções
+prop_comparison <- tibble(
+  Conjunto   = c("Completo", "Treino", "Teste"),
+  Continua   = c(mean(df$churn_in_2y_int == "continua"),
+                 mean(train$churn_in_2y_int == "continua"),
+                 mean(test$churn_in_2y_int == "continua")),
+  Fecha      = c(mean(df$churn_in_2y_int == "fecha"),
+                 mean(train$churn_in_2y_int == "fecha"),
+                 mean(test$churn_in_2y_int == "fecha"))
+)
+
+```
+```{r, tabela comparativa conjunto, message=FALSE, warning=FALSE}
+
+kable(prop_comparison, digits = 3, caption = "Proporção de classes após split") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+
+```
+A tabela acima mostra que as proporções de empresas que **continuaram operando** e que **fecharam** se mantêm iguais entre o conjunto completo, o conjunto de treino e o conjunto de teste.  
+
+Isso significa que o **split estratificado** funcionou corretamente, evitando distorções na distribuição do alvo e garantindo que ambos os conjuntos representem de forma fiel a realidade do problema.
+
+Esse cuidado é essencial, pois assegura que os modelos treinados não sejam enviesados por diferenças artificiais entre as amostras de treino e teste.
+
+
+Essas métricas são fundamentais pois, em um cenário de crédito, fornecedores e investidores preferem **errar por excesso de cautela** (alertar sobre risco quando a empresa segue ativa) do que por omissão (não alertar sobre risco de fechamento).
+
+# Modelagem preditiva
+
+<div class="alert alert-info">
+Nesta etapa, vamos treinar diferentes algoritmos de classificação para prever o fechamento de empresas em até dois anos. 
+O objetivo é comparar os modelos em relação ao desempenho preditivo e selecionar aquele que apresenta melhor equilíbrio entre as métricas definidas anteriormente.
+</div>
+
+Os modelos considerados serão:
+
+1. **Regressão Logística**: modelo de referência, linear e interpretável, servindo como baseline para comparação.  
+2. **Regressão Logística com Lasso (penalização L1)**: versão regularizada que realiza seleção automática de variáveis, reduzindo complexidade e destacando os preditores mais relevantes.  
+3. **Árvore de Decisão**: captura interações entre variáveis de forma não linear, fácil de visualizar e interpretar.  
+4. **Random Forest**: ensemble de múltiplas árvores, mais robusto contra overfitting e capaz de lidar com relações complexas.  
+5. **Gradient Boosting**: algoritmo baseado em árvores que constrói modelos sequenciais, corrigindo erros anteriores, geralmente com excelente desempenho em bases tabulares.
+
+## Métricas de avaliação
+
+<div class="alert alert-success">
+Para avaliar os modelos, vamos considerar métricas que capturam não apenas a acurácia global, mas também a capacidade de prever corretamente empresas em risco de fechamento.
+</div>
+
+- **AUC-ROC**: mede a capacidade do modelo em separar empresas que fecharão das que permanecerão ativas.  
+- **Recall (Sensibilidade)**: importante porque queremos minimizar falsos negativos (não prever risco quando ele existe).  
+- **Precision (Precisão)**: garante que quando o modelo indicar risco, isso não seja um alarme falso.  
+- **F1-score**: equilíbrio entre precisão e recall.  
+- **Brier Score**: avalia se as probabilidades estimadas pelo modelo são bem calibradas.
+
+## Regressão Logística (Baseline)
+
+<div class="alert alert-info">
+Um modelo estatístico clássico, simples e interpretável. Utilizamos apenas duas variáveis (idade da empresa e volume de vendas) como **referência inicial**, servindo de benchmark para comparação com modelos mais complexos.
+</div>
+
+```{r, glm baseline, message=FALSE, warning=FALSE}
+
+# Treino e teste sem NAs
+train_glm1 <- train %>% drop_na(age_years, sales_log1p, churn_in_2y_int)
+test_glm1  <- test  %>% drop_na(age_years, sales_log1p, churn_in_2y_int)
+
+# Modelo baseline
+fit_glm1 <- glm(churn_in_2y_int ~ age_years + sales_log1p,
+                data = train_glm1, family = "binomial")
+
+pred1 <- predict(fit_glm1, test_glm1, type = "response")
+
+# Coeficientes + OR (baseline)
+coef_table_base <- broom::tidy(fit_glm1) %>%
+  mutate(odds_ratio = exp(estimate))
+
+kable(coef_table_base, digits = 4,
+      caption = "Coeficientes do GLM Baseline") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+
+```
+**Interpretação do Modelo GLM Baseline**
+
+O **modelo de regressão logística baseline**, que utiliza apenas duas variáveis — **idade da empresa** e **volume de vendas (log-transformado)** — já nos permite extrair informações relevantes sobre os fatores associados ao risco de fechamento:
+
+- **Intercepto (22.41 de odds):** o intercepto representa o log-odds de uma empresa encerrar atividades quando idade e vendas assumem valor zero. Embora isso não tenha interpretação prática direta (ninguém espera empresa com idade 0 e vendas 0), ele serve como referência para o cálculo dos demais efeitos.
+
+- **Idade da empresa (`age_years`):** o coeficiente estimado é **-0.0616**, que convertido em *odds ratio* resulta em **0.94**. Isso significa que, **a cada ano adicional de idade, a chance de a empresa fechar diminui em torno de 6%**, mantendo as vendas constantes. Na prática, empresas mais maduras tendem a apresentar maior resiliência no mercado.
+
+- **Vendas (`sales_log1p`):** o coeficiente estimado é **-0.3847**, com *odds ratio* de **0.68**. Isso indica que, para cada unidade adicional no log das vendas, **a probabilidade de fechamento diminui cerca de 32%**, mantendo a idade constante. Em outras palavras, empresas com maior volume de vendas apresentam menor risco de churn.
+
+O modelo baseline confirma um padrão intuitivo e estatisticamente consistente: **empresas mais antigas e com maiores volumes de vendas têm menor risco de encerrar atividades.** Esse resultado faz sentido do ponto de vista econômico e valida que os preditores escolhidos já capturam parte importante do fenômeno.
+
+## Regressão Logística (todas as variáveis)
+
+<div class="alert alert-info">
+Versão expandida do baseline, incluindo todas as variáveis disponíveis. Permite avaliar simultaneamente fatores demográficos, contábeis e financeiros no risco de fechamento.
+</div>
+
+```{r, glm all, message=FALSE, warning=FALSE}
+# Mantém apenas colunas válidas (sem NA total ou constantes)
+ok_cols <- names(train)[sapply(train, function(x) !all(is.na(x)) && dplyr::n_distinct(x) > 1)]
+train_all <- train[, ok_cols, drop = FALSE]
+test_all  <- test[, intersect(ok_cols, names(test)), drop = FALSE]
+
+# Modelo com todas as variáveis
+fit_glm_all <- glm(churn_in_2y_int ~ ., data = train_all, family = "binomial")
+pred_all <- predict(fit_glm_all, test_all, type = "response")
+
+# Coeficientes + OR (todas variáveis)
+coef_table_all <- broom::tidy(fit_glm_all) %>%
+  mutate(odds_ratio = exp(estimate))
+
+kable(coef_table_all, digits = 4,
+      caption = "Coeficientes do GLM com todas as variáveis") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+
+
+```
+```{r, roc, message=FALSE, warning=FALSE}
+roc1 <- tibble(classe = test_glm1$churn_in_2y_int, prob = pred1) %>%
+  roc_curve(truth = classe, prob, event_level = "second")
+
+roc2 <- tibble(classe = test_all$churn_in_2y_int, prob = pred_all) %>%
+  roc_curve(truth = classe, prob, event_level = "second")
+
+roc_both <- bind_rows(
+  roc1 %>% mutate(modelo = "GLM: idade + sales_log1p"),
+  roc2 %>% mutate(modelo = "GLM: todas as variáveis")
+)
+
+```
+
+O **GLM com todas as variáveis** nos permite avaliar simultaneamente fatores demográficos, financeiros e contábeis relacionados ao risco de fechamento. Alguns achados importantes:
+
+- **Idade e Vendas** mantêm efeito protetor, reduzindo a probabilidade de churn (empresas mais antigas e com maiores volumes de vendas são mais resilientes).  
+- Variáveis financeiras como **liquidez**, **estoques** e **ativos tangíveis** também aparecem significativas, sugerindo que **estrutura patrimonial mais sólida reduz riscos**.  
+- Alguns fatores, como **despesas com materiais** e **passivos circulantes**, aumentam a chance de fechamento, possivelmente refletindo **maior exposição financeira**.  
+- Nem todas as variáveis são significativas — por isso modelos regularizados (como o Lasso) podem ajudar a simplificar sem perder preditividade.
+
+Com esse modelo mostra que **é possível construir um perfil de risco mais abrangente** ao integrar múltiplos indicadores. Mesmo que nem todos os coeficientes sejam estáveis ou facilmente interpretáveis, ele funciona como **referência de comparação** para modelos mais enxutos e regularizados. Ou seja, entendemos **quais variáveis merecem mais atenção** e podemos avançar para técnicas que selecionem automaticamente os preditores mais relevantes.
+
+
+```{r, grafico roc dois modelos, message=FALSE, warning=FALSE}
+#Gráfico comparativo
+ggplot(roc_both, aes(x = 1 - specificity, y = sensitivity, color = modelo)) +
+  geom_line(size = 1.1) +
+  geom_abline(linetype = "dashed", color = "gray50") +
+  scale_color_manual(values = c(
+    "GLM: idade + sales_log1p" = "#A8D5BA",
+    "GLM: todas as variáveis"  = "#F7B7A3"
+  )) +
+  labs(title = "ROC - comparação dos GLMs",
+       x = "1 - Specificity", y = "Sensitivity", color = NULL) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+cat("AUC (GLM1):", roc_auc_vec(truth = test_glm1$churn_in_2y_int, estimate = pred1, event_level = "second"), "\n")
+cat("AUC (GLM2):", roc_auc_vec(truth = test_all$churn_in_2y_int, estimate = pred_all, event_level = "second"), "\n")
+
+
+```
+
+- O **modelo baseline (GLM1)**, usando apenas idade da empresa e vendas, obteve um **AUC = 0.70**. Isso significa que ele tem desempenho moderado, melhor que o acaso (0.5), mas ainda limitado.  
+- O **modelo completo (GLM2)**, com todas as variáveis disponíveis, alcançou um **AUC = 0.77**, indicando **maior capacidade de discriminar** empresas que fecharão das que continuarão ativas.  
+- Em termos práticos, incluir variáveis adicionais melhora a performance, mas o ganho não é explosivo — mostrando que idade e vendas já são bons preditores, embora insuficientes sozinhos.  
+
+De forma geral, um AUC em torno de 0.70 é considerado aceitável, enquanto valores acima de 0.75 já indicam boa capacidade preditiva — logo, o modelo completo (0.77) mostra desempenho superior ao baseline (0.70).  
+
+O GLM com todas as variáveis é mais robusto, mas ainda há espaço para explorar técnicas mais sofisticadas para melhorar a capacidade preditiva.
+
+## Regressão Logística com Lasso
+
+<div class="alert alert-info">
+Uma versão regularizada da regressão logística. O LASSO aplica uma penalização que zera coeficientes pouco relevantes, realizando seleção automática de variáveis. Assim, reduz a complexidade do modelo e favorece interpretabilidade sem perder desempenho.
+</div>
+
+```{r, lasso, message=FALSE, warning=FALSE}
+# receita didática + tuning + roc/auc
+# regularizar (penalização l1) e selecionar variáveis 
+# receita: imputar NA (mediana/moda) -> dummies -> normalizar -> SMOTE (só treino)
+# Receita: imputar NA, criar dummies, normalizar, aplicar SMOTE (só treino)
+rec_lasso <- recipe(churn_in_2y_int ~ ., data = train) |>
+  step_zv(all_predictors()) |>
+  step_impute_median(all_numeric_predictors()) |>
+  step_impute_mode(all_nominal_predictors()) |>
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) |>
+  step_normalize(all_numeric_predictors()) |>
+  step_smote(churn_in_2y_int)
+
+# Modelo LASSO
+mod_lasso <- logistic_reg(
+  penalty = tune(),
+  mixture = 1  # 1 = L1 (LASSO)
+) |>
+  set_engine("glmnet")
+
+wf_lasso <- workflow() |>
+  add_recipe(rec_lasso) |>
+  add_model(mod_lasso)
+
+# Validação cruzada
+set.seed(123)
+folds_lasso <- vfold_cv(train, v = 5, strata = churn_in_2y_int)
+grid_pen    <- grid_regular(penalty(), levels = 30)
+
+tuned_lasso <- tune_grid(
+  wf_lasso,
+  resamples = folds_lasso,
+  grid = grid_pen,
+  metrics = metric_set(roc_auc),
+  control = control_grid(save_pred = TRUE)
+)
+
+# Melhor lambda
+best_pen <- select_best(tuned_lasso, metric = "roc_auc")
+best_pen
+
+# Ajuste final com o lambda escolhido
+final_lasso <- finalize_workflow(wf_lasso, best_pen) |> fit(train)
+
+# Previsões no teste
+pred_lasso <- predict(final_lasso, new_data = test, type = "prob")$.pred_fecha
+
+# ROC e AUC do LASSO
+roc_lasso <- tibble(truth = test$churn_in_2y_int, prob = pred_lasso) |>
+  roc_curve(truth, prob, event_level = "second")
+
+cat("AUC (LASSO):", 
+    roc_auc_vec(truth = test$churn_in_2y_int, estimate = pred_lasso, event_level = "second"))
+
+```
+
+```{r, comparacao gráfico, message=FALSE, warning=FALSE}
+
+# Juntar curvas ROC dos modelos
+roc_both_lasso <- bind_rows(
+  roc1 %>% mutate(modelo = "GLM: idade + sales_log1p"),
+  roc2 %>% mutate(modelo = "GLM: todas as variáveis"),
+  roc_lasso %>% mutate(modelo = "LASSO")
+)
+
+#Gráfico comparativo
+ggplot(roc_both_lasso, aes(x = 1 - specificity, y = sensitivity, color = modelo)) +
+  geom_line(size = 1.1) +
+  geom_abline(linetype = "dashed", color = "gray50") +
+  scale_color_manual(values = c(
+    "GLM: idade + sales_log1p" = "#A8D5BA",
+    "GLM: todas as variáveis"  = "#F7B7A3",
+    "LASSO"                    = "#6C5B7B" 
+  )) +
+  labs(title = "ROC - GLMs vs LASSO",
+       x = "1 - Specificity", y = "Sensitivity", color = NULL) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+```
+
+
+```{r, tabela comparativa, message=FALSE, warning=FALSE}
+# Criar tibble com os valores de AUC
+auc_table <- tibble::tibble(
+  Modelo = c("GLM: idade + sales_log1p", 
+             "GLM: todas as variáveis", 
+             "LASSO"),
+  AUC = c(
+    roc_auc_vec(truth = test_glm1$churn_in_2y_int, estimate = pred1, event_level = "second"),
+    roc_auc_vec(truth = test_all$churn_in_2y_int, estimate = pred_all, event_level = "second"),
+    roc_auc_vec(truth = test$churn_in_2y_int, estimate = pred_lasso, event_level = "second")
+  )
+)
+
+# Exibir como tabela estilizada
+kable(auc_table, digits = 3, caption = "Comparação das AUCs entre os modelos") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE, position = "center")
+
+```
+O modelo LASSO alcançou AUC de 0.768, praticamente igual ao modelo GLM com todas as variáveis (0.769) e acima do baseline (0.702).
+
+A principal diferença é que o LASSO realiza seleção automática de variáveis, reduzindo complexidade e descartando preditores pouco relevantes. Isso é útil para interpretabilidade e generalização, já que mantém um desempenho semelhante ao modelo completo, mas com menos risco de overfitting.
+
+O LASSO confirma que é possível manter uma boa capacidade preditiva com menos variáveis, oferecendo um modelo mais parcimonioso e interpretável.
+
+## Árvore de Decisão
+
+<div class="alert alert-info">
+Algoritmo baseado em divisões sucessivas dos dados em regras de “se... então...”. Facilita a interpretação visual e ajuda a entender como variáveis financeiras se combinam para identificar risco de fechamento.
+</div>
+
+```{r, decision_tree_pruned, message=FALSE, warning=FALSE}
+fit_tree <- rpart(
+  churn_in_2y_int ~ ., 
+  data = train, 
+  method = "class", 
+  control = rpart.control(cp = 0.01, minsplit = 20)
+)
+
+rpart.plot(fit_tree, type = 3, extra = 106, fallen.leaves = TRUE,
+           main = "Árvore de Decisão (CART)")
+
+pred_tree <- predict(fit_tree, newdata = test, type = "prob")[, "fecha"]
+
+roc_tree <- tibble(truth = test$churn_in_2y_int, prob = pred_tree) |>
+  roc_curve(truth, prob, event_level = "second")
+
+auc_tree <- roc_auc_vec(truth = test$churn_in_2y_int, estimate = pred_tree, event_level = "second")
+
+cat("AUC (Árvore de Decisão):", auc_tree, "\n")
+```
+
+A árvore de decisão mostrou que empresas com mais ativos tangíveis (máquinas, imóveis, equipamentos) têm maior probabilidade de continuar ativas, sugerindo que a estrutura patrimonial funciona como proteção contra o fechamento. Já entre empresas com ativos tangíveis baixos, a liquidez passa a ser determinante: quem tem mais ativos líquidos tende a sobreviver, enquanto aquelas com baixa liquidez e estoques reduzidos apresentam risco elevado de encerramento. Além disso, um alto passivo circulante (muitas dívidas de curto prazo) surge como um forte preditor de falência.
+
+```{r, curva com todos modelos, message=FALSE, warning=FALSE}
+# ROC da árvore com label
+roc_tree_labeled <- roc_tree |> mutate(modelo = "Árvore de Decisão")
+
+# Juntando todas as curvas
+roc_all_models <- bind_rows(
+  roc1 |> mutate(modelo = "GLM: idade + sales_log1p"),
+  roc2 |> mutate(modelo = "GLM: todas as variáveis"),
+  roc_lasso |> mutate(modelo = "LASSO"),
+  roc_tree_labeled
+)
+
+# Gráfico comparativo
+ggplot(roc_all_models, aes(x = 1 - specificity, y = sensitivity, color = modelo)) +
+  geom_line(size = 1.1) +
+  geom_abline(linetype = "dashed", color = "gray50") +
+  scale_color_manual(values = c(
+    "GLM: idade + sales_log1p" = "#A8D5BA",
+    "GLM: todas as variáveis"  = "#F7B7A3",
+    "LASSO"                    = "#6C5B7B",
+    "Árvore de Decisão" = "#FDB462"
+  )) +
+  labs(title = "ROC - Comparação dos Modelos",
+       x = "1 - Specificity", y = "Sensitivity", color = NULL) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+O gráfico confirma os resultados da tabela: GLM com todas as variáveis e LASSO apresentam as melhores curvas, bem afastadas da linha de referência (AUC ≈ 0.77). O baseline (idade + vendas) aparece em nível intermediário (AUC ≈ 0.70). Já a Árvore de Decisão, apesar de intuitiva e fácil de interpretar, apresenta desempenho mais fraco (AUC ≈ 0.63), ficando próxima da linha do acaso em algumas regiões.
+
+```{r, tabelinha 2, message=FALSE, warning=FALSE}
+# Tabela comparativa de AUCs
+metrics_tbl <- tibble::tibble(
+  Modelo = c("GLM: idade + sales_log1p", "GLM: todas as variáveis", "LASSO", "Árvore de Decisão"),
+  AUC    = c(
+    roc_auc_vec(truth = test_glm1$churn_in_2y_int, estimate = pred1, event_level = "second"),
+    roc_auc_vec(truth = test_all$churn_in_2y_int, estimate = pred_all, event_level = "second"),
+    roc_auc_vec(truth = test$churn_in_2y_int, estimate = pred_lasso, event_level = "second"),
+    auc_tree
+  )
+)
+
+kable(metrics_tbl, digits = 3, caption = "Comparação de AUCs entre Modelos") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE, position = "center")
+```
+
+A Árvore de Decisão ficou bem abaixo (AUC ≈ 0.63), **indicando que, apesar da alta interpretabilidade, seu poder de predição é limitado quando comparado aos modelos lineares regularizados**.
+
+## Random Forest
+
+<div class="alert alert-info">
+Método de ensemble que combina diversas árvores de decisão, cada uma treinada em subconjuntos dos dados. É mais robusto e reduz o risco de overfitting, além de fornecer medidas de importância das variáveis.
+</div>
+
+```{r, ramdom forest, message=FALSE, warning=FALSE}
+# Random Forest
+if (!requireNamespace("randomForest", quietly = TRUE)) install.packages("randomForest")
+library(randomForest)
+
+set.seed(123)
+
+# Ajuste do modelo com todas as variáveis disponíveis (mesmo pré-processamento do GLM all)
+fit_rf <- randomForest(
+  churn_in_2y_int ~ ., 
+  data = train_all, 
+  ntree = 500,        # número de árvores
+  mtry = floor(sqrt(ncol(train_all) - 1)), # nº de variáveis em cada split
+  importance = TRUE
+)
+
+# Previsões no teste (probabilidade de "fecha")
+pred_rf <- predict(fit_rf, newdata = test_all, type = "prob")[, "fecha"]
+
+# AUC Random Forest
+auc_rf <- roc_auc_vec(
+  truth = test_all$churn_in_2y_int,
+  estimate = pred_rf,
+  event_level = "second"
+)
+
+cat("AUC (Random Forest):", auc_rf, "\n")
+
+# ---------------------------
+# Importância das variáveis — duas métricas
+# ---------------------------
+importance_df <- importance(fit_rf) %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column("variavel") %>%
+  arrange(desc(MeanDecreaseGini))
+
+# Reorganizar no formato longo para plotar com facet
+importance_long <- importance_df %>%
+  pivot_longer(cols = c(MeanDecreaseAccuracy, MeanDecreaseGini),
+               names_to = "Metrica", values_to = "Importancia") %>%
+  group_by(Metrica) %>%
+  slice_max(order_by = Importancia, n = 15) %>%
+  ungroup()
+
+ggplot(importance_long, aes(x = reorder(variavel, Importancia), y = Importancia, fill = Metrica)) +
+  geom_col(show.legend = FALSE) +
+  coord_flip() +
+  facet_wrap(~Metrica, scales = "free_x") +
+  scale_fill_manual(values = c("MeanDecreaseAccuracy" = "#4c88b0",
+                               "MeanDecreaseGini" = "#b08a4c")) +
+  labs(title = "Importância das Variáveis - Random Forest",
+       x = NULL,
+       y = "Valor da importância") +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(size = 14, face = "bold", color = "#2C3E50"),
+    axis.text = element_text(color = "#2C3E50")
+  )
+```
+
+O modelo de **Random Forest** permite avaliar a relevância de cada variável por meio de duas métricas principais:
+
+- **MeanDecreaseAccuracy**: mede quanto a acurácia do modelo cai quando uma variável é retirada ou embaralhada.  
+  Quanto maior o valor, maior a contribuição daquela variável para manter a capacidade preditiva do modelo.  
+
+- **MeanDecreaseGini**: mede a redução média na impureza dos nós da árvore (índice de Gini) quando uma variável é usada para fazer divisões.  
+  Valores altos indicam que a variável é importante para separar as classes ao longo das árvores da floresta.  
+
+---
+
+**Principais resultados**
+
+- **Liquidez (`liq_assets_log1p`)** e **Vendas (`sales_log1p`)** foram as variáveis mais importantes, tanto para manter a acurácia quanto para reduzir a impureza.  
+- **Passivos e ativos circulantes (`curr_liab_log1p`, `curr_assets_log1p`)**, além de **despesas com material e pessoal**, também tiveram grande relevância.  
+- Outras variáveis financeiras, como **amortizações**, **ativos fixos e tangíveis**, aparecem entre os preditores mais fortes.  
+- Já variáveis demográficas e categóricas (como `ind2`, `urban_m`, `nace_main`) tiveram impacto bem menor, mostrando que o **perfil financeiro da empresa pesa mais que localização ou setor**.
+
+---
+
+**Conclusão:** O Random Forest confirma que **indicadores financeiros (liquidez, vendas, ativos e passivos)** são os melhores preditores de risco de fechamento, enquanto características demográficas ou categóricas exercem papel secundário.
+
+```{r, roc com random forest, message=FALSE, warning=FALSE}
+# ROC da Random Forest com label
+roc_rf <- tibble(truth = test_all$churn_in_2y_int, prob = pred_rf) |>
+  roc_curve(truth, prob, event_level = "second") |>
+  mutate(modelo = "Random Forest")
+
+# Juntando todas as curvas
+roc_all_models <- bind_rows(
+  roc1 |> mutate(modelo = "GLM: idade + sales_log1p"),
+  roc2 |> mutate(modelo = "GLM: todas as variáveis"),
+  roc_lasso |> mutate(modelo = "LASSO"),
+  roc_tree |> mutate(modelo = "Árvore de Decisão"),
+  roc_rf
+)
+
+# Gráfico comparativo
+ggplot(roc_all_models, aes(x = 1 - specificity, y = sensitivity, color = modelo)) +
+  geom_line(size = 1.1) +
+  geom_abline(linetype = "dashed", color = "gray50") +
+  scale_color_manual(values = c(
+    "GLM: idade + sales_log1p" = "#A8D5BA",
+    "GLM: todas as variáveis"  = "#F7B7A3",
+    "LASSO"                    = "#6C5B7B",
+    "Árvore de Decisão" = "#FDB462",
+    "Random Forest" = "#7284c2"
+  )) +
+  labs(title = "ROC - Comparação dos Modelos",
+       x = "1 - Specificity", y = "Sensitivity", color = NULL) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+```
+
+```{r, tabelinha auc com random forest, message=FALSE, warning=FALSE}
+# Comparação de AUCs entre Modelos
+# Comparação de AUCs entre Modelos
+auc_table <- tibble::tibble(
+  Modelo = c(
+    "GLM: idade + sales_log1p",
+    "GLM: todas as variáveis",
+    "LASSO",
+    "Árvore de Decisão",
+    "Random Forest"
+  ),
+  AUC = c(
+    roc_auc_vec(truth = test_glm1$churn_in_2y_int, estimate = pred1, event_level = "second"),
+    roc_auc_vec(truth = test_all$churn_in_2y_int, estimate = pred_all, event_level = "second"),
+    roc_auc_vec(truth = test$churn_in_2y_int, estimate = pred_lasso, event_level = "second"),
+    roc_auc_vec(truth = test$churn_in_2y_int, estimate = pred_tree, event_level = "second"),
+    auc_rf
+  )
+)
+
+kable(auc_table, digits = 3,
+      caption = "Comparação de AUCs entre Modelos") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE, position = "center")
+
+
+```
+
+A Random Forest alcançou desempenho robusto (AUC ≈ 0.79), superando todos os demais modelos e confirmando a vantagem dos ensembles sobre algoritmos individuais.
+
+## Gradient Boosting (XGBoost)
+
+<div class="alert alert-info">
+Outro método de ensemble baseado em árvores, mas que funciona de forma sequencial, corrigindo os erros dos modelos anteriores. Geralmente atinge alta performance em bases tabulares e é bastante usado em competições de ciência de dados.
+</div>
+
+```{r, xgboost, message=FALSE, warning=FALSE}
+
+# Transformar dados em matriz numérica para o xgboost
+train_x <- model.matrix(churn_in_2y_int ~ ., data = train_all)[, -1]
+test_x  <- model.matrix(churn_in_2y_int ~ ., data = test_all)[, -1]
+
+train_y <- ifelse(train_all$churn_in_2y_int == "fecha", 1, 0)
+test_y  <- ifelse(test_all$churn_in_2y_int == "fecha", 1, 0)
+
+dtrain <- xgb.DMatrix(data = train_x, label = train_y)
+dtest  <- xgb.DMatrix(data = test_x,  label = test_y)
+
+set.seed(123)
+fit_xgb <- xgboost(
+  data = dtrain,
+  nrounds = 300,
+  objective = "binary:logistic",
+  eval_metric = "auc",
+  max_depth = 6,
+  eta = 0.1,
+  subsample = 0.8,
+  colsample_bytree = 0.8,
+  verbose = 0
+)
+
+pred_xgb <- predict(fit_xgb, newdata = dtest)
+
+
+auc_xgb <- roc_auc_vec(
+  truth = test_all$churn_in_2y_int,
+  estimate = pred_xgb,
+  event_level = "second"
+)
+cat("AUC (XGBoost):", auc_xgb, "\n")
+
+# Curva ROC já preparada para o comparativo
+roc_xgb <- tibble(truth = test_all$churn_in_2y_int, prob = pred_xgb) |>
+  roc_curve(truth, prob, event_level = "second") |>
+  mutate(modelo = "Gradient Boosting")
+```
+
+```{r, xgboost no gráfico, message=FALSE, warning=FALSE}
+# Adicionando XGBoost ao comparativo
+# Juntando todas as curvas
+roc_all_models <- bind_rows(
+  roc1 |> mutate(modelo = "GLM: idade + sales_log1p"),
+  roc2 |> mutate(modelo = "GLM: todas as variáveis"),
+  roc_lasso |> mutate(modelo = "LASSO"),
+  roc_tree |> mutate(modelo = "Árvore de Decisão"),
+  roc_rf   |> mutate(modelo = "Random Forest"),
+  roc_xgb
+)
+
+# Gráfico comparativo
+ggplot(roc_all_models, aes(x = 1 - specificity, y = sensitivity, color = modelo)) +
+  geom_line(size = 1.1) +
+  geom_abline(linetype = "dashed", color = "gray50") +
+  scale_color_manual(values = c(
+    "GLM: idade + sales_log1p" = "#A8D5BA",
+    "GLM: todas as variáveis"  = "#F7B7A3",
+    "LASSO"                    = "#6C5B7B",
+    "Árvore de Decisão" = "#FDB462",
+    "Random Forest" = "#7284c2",
+    "Gradient Boosting" = "#E78AC3"
+  )) +
+  labs(title = "ROC - Comparação dos Modelos",
+       x = "1 - Specificity", y = "Sensitivity", color = NULL) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+```
+
+```{r, tabelinha uac com xgboost, message=FALSE, warning=FALSE}
+auc_table <- tibble::tibble(
+  Modelo = c(
+    "GLM: idade + sales_log1p",
+    "GLM: todas as variáveis",
+    "LASSO",
+    "Árvore de Decisão",
+    "Random Forest",
+    "Gradient Boosting"
+  ),
+  AUC = c(
+    roc_auc_vec(truth = test_glm1$churn_in_2y_int, estimate = pred1, event_level = "second"),
+    roc_auc_vec(truth = test_all$churn_in_2y_int, estimate = pred_all, event_level = "second"),
+    roc_auc_vec(truth = test$churn_in_2y_int, estimate = pred_lasso, event_level = "second"),
+    auc_tree,
+    auc_rf,
+    auc_xgb
+  )
+)
+
+kable(auc_table, digits = 3,
+      caption = "Comparação de AUCs entre Modelos") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE, position = "center")
+```
+
+O Gradient Boosting apresentou um desempenho sólido (AUC = 0.782), bastante próximo ao Random Forest (0.786) e superior à Árvore de Decisão (0.628) e ao baseline (0.702). Embora o GLM com todas as variáveis (0.769) e o LASSO (0.768) tenham se saído bem, os métodos baseados em árvores (Random Forest e Gradient Boosting) entregaram o melhor poder preditivo.
+
+# Avaliação geral dos modelos preditivos
+
+```{r, avaliaçao geral, message=FALSE, warning=FALSE}
+
+calc_metrics <- function(truth, prob, modelo) {
+  # converte probabilidade em classe (cutoff = 0.5)
+  pred_class <- ifelse(prob >= 0.5, "fecha", "continua") %>% factor(levels = levels(truth))
+  
+  tibble::tibble(
+    Modelo    = modelo,
+    Recall    = recall_vec(truth, pred_class, event_level = "second"),
+    Precision = precision_vec(truth, pred_class, event_level = "second"),
+    F1        = f_meas_vec(truth, pred_class, event_level = "second"),
+    Brier     = mean((as.numeric(truth == "fecha") - prob)^2)
+  )
+}
+
+# fazer o cálculo para todos os modelso
+metrics_all <- bind_rows(
+  calc_metrics(test_glm1$churn_in_2y_int, pred1, "GLM: idade + sales_log1p"),
+  calc_metrics(test_all$churn_in_2y_int, pred_all, "GLM: todas as variáveis"),
+  calc_metrics(test$churn_in_2y_int, pred_lasso, "LASSO"),
+  calc_metrics(test$churn_in_2y_int, pred_tree, "Árvore de Decisão"),
+  calc_metrics(test_all$churn_in_2y_int, pred_rf, "Random Forest"),
+  calc_metrics(test_all$churn_in_2y_int, pred_xgb, "Gradient Boosting")
+)
+
+```
+
+```{r, heatmap metricas, message=FALSE, warning=FALSE}
+metrics_all %>%
+  gt() %>%
+  fmt_number(
+    columns = -Modelo,
+    decimals = 3
+  ) %>%
+  tab_header(
+    title = "Métricas de Desempenho por Modelo"
+  ) %>%
+  data_color(
+    columns = c(Recall, Precision, F1),
+    colors = scales::col_numeric(
+      palette = c("#f7fbff", "#08306b"),
+      domain = c(0,1)
+    )
+  ) %>%
+  data_color(
+    columns = Brier,
+    colors = scales::col_numeric(
+      palette = c("#08306b", "#f7fbff"), # invertido!
+      domain = range(metrics_all$Brier)
+    )
+  )
+
+```
+
+## Comparação das métricas adicionais
+
+### GLM Baseline (idade + vendas)  
+- **Recall: 0.048** → praticamente não identifica empresas que irão fechar.  
+- **Precision: 0.439** → acerta em parte quando prevê risco.  
+- **F1: 0.087** → equilíbrio muito fraco.  
+- **Brier: 0.150** → calibração mediana.  
+
+Modelo útil apenas como **referência inicial**, mas não é eficaz para predição real.  
+
+---
+
+### GLM com todas as variáveis 
+- **Recall: 0.221** → melhora significativa em relação ao baseline.  
+- **Precision: 0.601** → relativamente confiável.  
+- **F1: 0.324** → desempenho moderado.  
+- **Brier: 0.136** → boa calibração.  
+
+Representa um **modelo mais robusto**, equilibrando sensibilidade e precisão sem exagerar nos falsos positivos.  
+
+---
+
+### LASSO  
+- **Recall: 0.698** → excelente capacidade de identificar empresas em risco.  
+- **Precision: 0.373** → muitos falsos alarmes.  
+- **F1: 0.486** → melhor equilíbrio geral entre os modelos.  
+- **Brier: 0.196** → pior calibração (probabilidades pouco confiáveis).  
+
+Forte em **sensibilidade**, garantindo que quase todos os casos positivos sejam detectados, mas ao custo de muitos alertas falsos.  
+
+---
+
+### Árvore de Decisão  
+- **Recall: 0.114** → baixa sensibilidade.  
+- **Precision: 0.637** → quando prevê risco, tende a estar certo.  
+- **F1: 0.194** → fraco.  
+- **Brier: 0.152** → calibração aceitável.  
+
+Modelo **muito conservador**, útil apenas para previsões de alta certeza, mas perde a maior parte dos casos positivos.  
+
+---
+
+### Random Forest  
+- **Recall: 0.225** → sensibilidade modesta.  
+- **Precision: 0.638** → alta precisão.  
+- **F1: 0.333** → desempenho razoável.  
+- **Brier: 0.133** → **melhor calibração** entre os modelos.  
+
+Modelo **robusto e bem calibrado**, porém pode deixar escapar parte relevante dos casos de risco.  
+
+---
+
+### Gradient Boosting (XGBoost)  
+- **Recall: 0.284** → mais sensível que a Random Forest.  
+- **Precision: 0.570** → menor confiabilidade que a Random Forest.  
+- **F1: 0.379** → bom equilíbrio entre Recall e Precision.  
+- **Brier: 0.136** → calibração consistente.  
+
+Modelo com **equilíbrio sólido**, capturando mais casos positivos sem perder muita confiabilidade.  
+
+---
+
+## Conclusão
+
+- **LASSO** → melhor em *Recall* → útil quando o objetivo é **não deixar nenhum caso crítico passar despercebido**, mesmo com muitos falsos positivos.  
+- **Random Forest** → melhor em *calibração* (Brier Score) → oferece **probabilidades mais realistas** para suporte a decisões.  
+- **Gradient Boosting** → melhor equilíbrio entre Recall e Precision → opção **mais balanceada** entre sensibilidade e confiabilidade.  
+- **Árvore de Decisão** → interpretável, mas de baixo desempenho.  
+- **GLMs** → medianos, úteis como benchmarks e pela interpretabilidade.  
+
